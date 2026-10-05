@@ -64,3 +64,16 @@ jobs:
             gpgrelay_ruby.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Remove source code assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            for asset in ${{ github.ref_name }}.zip ${{ github.ref_name }}.tar.gz; do
+              if gh release view "$tag" --json assets --jq '.assets[].name' | grep -Fxq "$asset"; then
+                gh release delete-asset "$tag" "$asset" --yes
+              fi
+            done
+          fi
