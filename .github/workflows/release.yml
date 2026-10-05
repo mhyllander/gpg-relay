@@ -27,26 +27,40 @@ jobs:
       - name: Build Go executables
         run: make -C gpg_relay_go all
 
-      - name: Build Ruby tar.gz
+      - name: Create Go archive
         run: |
-          tar zcf gpgrelay.tar.gz LICENSE \
+          tar zcf gpgrelay_go.tar.gz LICENSE \
+            -C gpg_relay_go \
+            gpg_relay_wsl gpg_relay_win.exe \
+            README.md systemd
+
+      - name: Create Ruby archive
+        run: |
+          tar zcf gpgrelay_ruby.tar.gz LICENSE \
+            -C gpg_relay_ruby \
+            relay.rb ssh_relay.rb gpg_relay_wsl.rb gpg_relay_win.rb \
+            Gemfile Gemfile.lock \
+            README.md systemd
+
+      - name: Create Ruby archive
+        run: |
+          tar zcf gpgrelay_ruby.tar.gz LICENSE \
             -C gpg_relay_ruby \
             relay.rb ssh_relay.rb gpg_relay_wsl.rb gpg_relay_win.rb \
             Gemfile Gemfile.lock README.md systemd
 
-      - name: Release
+      - name: Create release
         id: create_release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref }}
-          name: Release ${{ github.ref }}
+          name: Release ${{ github.ref_name }}
           body_path: ReleaseNotes.md
           draft: false
           prerelease: ${{ contains(github.ref, '-pre') }}
           fail_on_unmatched_files: true
           files: |-
-            gpgrelay.tar.gz
-            gpg_relay_go/gpg_relay_wsl
-            gpg_relay_go/gpg_relay_win.exe
+            gpgrelay_go.tar.gz
+            gpgrelay_ruby.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
