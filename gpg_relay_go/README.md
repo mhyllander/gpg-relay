@@ -6,7 +6,38 @@ forward ssh requests to gpg-agent.exe, when using a PGP key for ssh
 authentication. It is especially useful when you store your PGP key on a
 Yubikey, since WSL cannot share access to USB devices with Windows.
 
-### GPG Access Modes
+## Overview
+
+This solution consists of two relay components:
+
+- **WSL Relay** (`gpg_relay_wsl`): Runs in WSL. Receives GPG and SSH
+  requests through local Unix sockets, and relays to `gpg-agent.exe` through different channels.
+- **Win Relay** (`gpg_relay_win.exe`): Runs in Windows. Only needed for WSL2 NAT
+  mode. Receives requests over TCP and forwards them to `gpg-agent.exe`.
+
+## Access and networking modes
+
+Windows Subsystem for Linux (WSL) exists in two versions, WSL1 and WSL2. For WSL2, you can configure the
+[networking mode](https://learn.microsoft.com/en-us/windows/wsl/wsl-config#main-wsl-settings) in `.wslconfig`, `NAT` or `mirrored`. `gpg-relay` supports three different modes that can be used in different situations:
+
+| WSL version | Networking mode | gpg-relay mode |
+|---|---|---|
+| WSL1 | | `mirrored` or `npiperelay` |
+| WSL2 | `NAT` | `nat` or `npiperelay` |
+| WSL2 | `mirrored` | `mirrored` or `npiperelay` |
+
+WSL Relay uses different methods of communication with `gpg-agent.exe` in Windows:
+
+| WSL Relay mode | protocol | access mechanism |
+|---|---|---|
+| mirrored | GPG | direct TCP access to each Assuan socket |
+| | SSH | multiplexing through npiperelay.exe to named pipe |
+| NAT | GPG | relaying via Win Relay to each Assuan socket |
+| | SSH | multiplexing through npiperelay.exe to named pipe |
+| npiperelay | GPG | relaying through npiperelay.exe to Assuan sockets |
+| | SSH | multiplexing through npiperelay.exe to named pipe |
+
+### Access Modes
 
 The WSL Relay supports three modes, selected with `--mode`:
 
@@ -58,104 +89,86 @@ This mode works in any WSL variant when Windows executable interop is
 enabled. It does not need the Win Relay or a Windows Firewall rule. It
 starts one `npiperelay` process per GPG client connection.
 
-### Access Modes
+## Installation
 
-- **Direct GPG access** (WSL1, WSL2 mirrored): The WSL Relay connects to
-  Gpg4win's Assuan sockets.
-- **GPG access using TCP relay** (WSL2 NAT): The WSL Relay connects to the Win Relay
-  over TCP. The Win Relay connects to Gpg4win's Assuan sockets.
-- **GPG access through npiperelay** (`npiperelay`): The WSL Relay starts
-  `npiperelay` on the Windows Assuan socket path for each GPG connection.
-- **SSH access** (all modes): The WSL Relay multiplexes all SSH client requests through one `npiperelay`
-  process for Gpg4win's `//./pipe/openssh-ssh-agent`.
+### Prerequisites
 
-### Authentication
+1. Install [Gpg4Win](https://www.gpg4win.org). Gpg4win's' `gpgconf.exe` must be found on the PATH, both in Windows and WSL.
+2. Install `npiperelay.exe`. It is recommended to use [albertony/npiperelay](https://github.com/albertony/npiperelay)
+   that has support for Assuan sockets.
 
-To prevent unauthorized access to the Win Relay in WSL2 NAT mode, a nonce-based authentication scheme is used.
-The Win Relay generates a random 16-byte nonce and stores it in a file.
-The WSL Relay reads the nonce from the file and sends it when connecting.
-The Win Relay rejects connections with an incorrect nonce.
+    a. Download `npiperelay.exe` to a location in Windows that can be accessed from WSL, e.g `C:\Program1`.
+    
+    b. Create a symlink in WSL, e.g. `sudo ln -s /mnt/c/Program1/npiperelay.exe /usr/local/bin/npiperelay`.
 
-## Architecture
+3. In WSL, `npiperelay`, `gpgconf`, `wslpath`, and `gpgconf.exe` must be found on the PATH.
+4. If using the Win Relay in Windows, `npiperelay.exe` and `gpgconf.exe` must be found on the PATH.
+5. To enable relaying of SSH requests, you must enable `enable-ssh-support` and `enable-win32-openssh-support` for
+   Gpg4win's gpg-agent.exe. The WSL Relay multiplexes all SSH client requests through one `npiperelay` process for
+   Gpg4win's `//./pipe/openssh-ssh-agent`.
 
-This solution consists of two relay components:
+### Systemd Socket Activation
 
-- **WSL Relay** (`gpg_relay_wsl`): Runs in WSL. Receives GPG and SSH
-  requests through local Unix sockets. It connects GPG traffic to Gpg4win
-  directly, through the Win Relay, or through `npiperelay`.
-- **Win Relay** (`gpg_relay_win.exe`): Runs in Windows only for WSL2 NAT
-  mode. Receives GPG requests over TCP and forwards them to Gpg4win.
+The recommended way to run the WSL Relay is via systemd socket activation. This
+eliminates the need for manual startup scripts and provides better startup
+ordering and resource management.
 
-Both executables share Go relay code in `internal/relay`.
+The [systemd](systemd) folder contains examples of running `gpg_relay_wsl` under systemd.
+You will need to update the `ExecStart` command with the command to run.
 
-Gpg4win's GPG Assuan socket files contain a TCP port and a nonce used
-to authenticate the connection. WSL1 and WSL2 mirrored mode can use
-these sockets directly. WSL2 NAT mode uses the Win Relay for GPG traffic.
-The `npiperelay` mode opens the Windows Assuan sockets through a Windows
-process, independent of the WSL networking mode.
 
-For SSH, the WSL Relay starts one `npiperelay` when the first client connects. It queues
-length-prefixed SSH agent requests from all clients and forwards one request
-and response at a time. It stops the shared process after 60 seconds without
-a request, measured from the last completed response. The next request starts
-a new process. SSH traffic never passes through the Win Relay.
- Gpg4win's gpg-agent must be configured with `enable-ssh-support` and
- `enable-win32-openssh-support`.
+#### Installing systemd units
 
-## Firewall and Security
+1. Copy the systemd unit files to your user systemd directory:
 
-### Firewall Rules
+   ```bash
+   mkdir -p ~/.config/systemd/user
+   cp systemd/*.socket systemd/*.service ~/.config/systemd/user/
+   ```
 
-The **mirrored** mode connects to 127.0.0.1 in Windows from WSL1 or WSL2 with mirrored networking.
-The **npiperelay** mode runs a Windows process to connect to the local
-Assuan socket. None of these modes requires a firewall change.
+2. Reload the systemd user daemon:
 
-**WSL2 NAT** mode requires a Windows Firewall rule to allow incoming
-connections to the Win Relay. A firewall rule must allow incoming connections
-to `gpg_relay_win.exe` on the three configured ports.
+   ```bash
+   systemctl --user daemon-reload
+   ```
 
-Specifically, add an incoming rule for the Public profile that allows
-connections from `172.16.0.0/12` and `192.168.0.0/16` to TCP ports
-`6910-6912` (or the three ports starting at the custom `--port`).
+3. Mask the gpg-agent service and socket units:
 
-The private IP address ranges listed above are used by WSL2, but probably
-also by computers on your local LAN. To limit access to the Win Relay, a
-simple nonce authentication scheme similar to Assuan sockets is used. The
-Win Relay stores a nonce in a file that should only be accessible by the
-user. By default it saves the file in the GPG home directory in Windows.
-The WSL Relay reads the nonce from the file and sends it to the Win Relay
-to authenticate.
+   ```bash
+   systemctl --user mask gpg-agent.service gpg-agent.socket gpg-agent-browser.socket gpg-agent-extra.socket gpg-agent-ssh.socket
+   ```
 
-This ensures that only local processes that can read the nonce file can
-authenticate with the Win Relay. Other connections will fail, which means
-that connections from other computers on the LAN will be rejected.
+4. Enable the gpg-relay-agent socket units:
 
-## Building
+   ```bash
+   systemctl --user enable --now gpg-relay-agent.socket gpg-relay-agent-extra.socket gpg-relay-agent-browser.socket gpg-relay-agent-ssh.socket
+   ```
 
-Build from this directory with Go 1.22 or newer:
+
+The service will now automatically start when any of the GPG sockets are
+accessed. The four sockets are:
+
+- `S.gpg-agent` - Main GPG agent socket
+- `S.gpg-agent.browser` - Browser GPG agent socket
+- `S.gpg-agent.extra` - Extra GPG agent socket
+- `S.gpg-agent.ssh` - SSH GPG agent socket
+
+### Configuration
+
+The systemd service file can be customized by creating a drop-in override:
 
 ```bash
-make gpg_relay_wsl gpg_relay_win.exe
-make test
+systemctl --user edit gpg-relay-agent.service
 ```
 
-The Makefile cross-compiles the Linux amd64 WSL executable and Windows amd64
-executable. Copy `gpg_relay_wsl` to a path in WSL (for example,
-`/usr/local/bin/gpg_relay_wsl`) and `gpg_relay_win.exe` to Windows. Gpg4win
-and its `gpgconf.exe`, `gpg-connect-agent.exe`, and `gpg-agent.exe` must be
-available on the Windows PATH. WSL needs access to `gpgconf.exe`. Direct
-modes also invoke `gpgconf` to locate local socket paths and `wslpath` to
-convert Windows paths; NAT mode uses `wslpath` when deriving the default
-nonce file path. The `npiperelay` mode passes Windows socket paths unchanged.
+For example, to change the access mode or enable SSH support:
 
-For SSH support or `npiperelay` GPG mode, install a current release of
-[albertony's npiperelay fork](https://github.com/albertony/npiperelay/releases)
-in Windows. This fork supports the `-a` Assuan socket option; the original
-`jstarks/npiperelay` release does not. Create a WSL symlink at
-`/usr/local/bin/npiperelay` pointing to `npiperelay.exe` and ensure
-`/usr/local/bin` is on the WSL Relay's `PATH`, including when started
-by systemd. The relay reports an error at startup if `npiperelay` is
-required and cannot be found. Windows executable interop must be enabled.
+```ini
+[Service]
+ExecStart=/usr/local/bin/gpg_relay_wsl --systemd --enable-ssh-support --mode=mirrored
+```
+
+## Usage
 
 ### WSL Relay
 
@@ -190,73 +203,50 @@ to `gpg_relay.nonce` in the Windows GPG home directory.
 - **`mirrored`** (default): Use this mode when running in WSL1 or when WSL2 is configured
   with mirrored networking. No firewall changes or Win Relay are needed.
 - **`nat`**: Use this mode when WSL2 is configured with NAT networking.
-  Requires a Windows Firewall rule (see [Firewall and Security](#firewall-and-security)).
-- **`npiperelay`**: Use this mode with any WSL networking configuration to
-  reach GPG through Windows executable interop. No Win Relay is needed.
+  Requires a Windows Firewall rule (see [Firewall rules](#firewall-rules)).
+- **`npiperelay`**: Use this mode with any WSL networking configuration to reach GPG through Windows executable interop.
+  No Win Relay is needed. While this works in all situations, it starts an npiperelay process for every request, so it
+  is less efficient than `mirrored` mode.
 
 When the mode is set to `nat`, the remote address is automatically
 detected from the default gateway. In `mirrored` mode,
 it defaults to `127.0.0.1`. An explicit `--remote-address` takes precedence.
 
-## Systemd Socket Activation
+## Firewall and Security
 
-The recommended way to run the WSL Relay is via systemd socket activation. This
-eliminates the need for manual startup scripts and provides better startup
-ordering and resource management.
+### Firewall Rules
 
-The [systemd](systemd) folder contains examples of running gpg_relay_wsl under systemd.
-You will need to update the `ExecStart` command with the command to run.
+The `nat` mode requires a Windows Firewall rule to allow incoming
+connections to the Win Relay. A firewall rule must allow incoming connections
+to `gpg_relay_win.exe` on the three configured ports.
 
+Specifically, add an incoming rule for the Public profile that allows
+connections from `172.16.0.0/12` and `192.168.0.0/16` to TCP ports
+`6910-6912` (or the three ports starting at the custom `--port`).
 
-### Installation
+### Authentication
 
-1. Copy the systemd unit files to your user systemd directory:
+The private IP address ranges listed above are used by WSL2, but could also be used by computers on your local LAN. To
+limit access to the Win Relay, a simple nonce authentication scheme similar to Assuan sockets is used. The Win Relay
+stores a nonce in a file that should only be accessible by the user. By default it saves the file in the GPG home
+directory in Windows. The WSL Relay reads the nonce from the file and sends it to the Win Relay to authenticate.
 
-   ```bash
-   mkdir -p ~/.config/systemd/user
-   cp systemd/*.socket systemd/*.service ~/.config/systemd/user/
-   ```
+This ensures that only local processes that can read the nonce file can
+authenticate with the Win Relay. Other connections will fail, which means
+that connections from other computers on the LAN will be rejected.
 
-2. Reload the systemd user daemon:
+## Building
 
-   ```bash
-   systemctl --user daemon-reload
-   ```
-
-3. Enable the socket units:
-
-   ```bash
-   systemctl --user enable --now gpg-relay-agent-socket.socket gpg-relay-agent-extra-socket.socket gpg-relay-agent-browser-socket.socket gpg-relay-agent-ssh-socket.socket
-   ```
-
-4. You may need to mask the gpg-agent service and socket units:
-
-   ```bash
-   systemctl --user mask gpg-agent.service gpg-agent.socket gpg-agent-browser.socket gpg-agent-extra.socket gpg-agent-ssh.socket
-   ```
-
-The service will now automatically start when any of the GPG sockets are
-accessed. The four sockets are:
-
-- `S.gpg-agent` - Main GPG agent socket
-- `S.gpg-agent.browser` - Browser GPG agent socket
-- `S.gpg-agent.extra` - Extra GPG agent socket
-- `S.gpg-agent.ssh` - SSH GPG agent socket
-
-### Configuration
-
-The systemd service file can be customized by creating a drop-in override:
+Build from this directory with Go 1.22 or newer:
 
 ```bash
-systemctl --user edit gpg-relay-agent.service
+make gpg_relay_wsl gpg_relay_win.exe
+make test
 ```
 
-For example, to change the access mode or enable SSH support:
-
-```ini
-[Service]
-ExecStart=/usr/local/bin/gpg_relay_wsl --systemd --enable-ssh-support --mode=mirrored
-```
+The Makefile cross-compiles the Linux amd64 WSL executable and Windows amd64
+executable. Copy `gpg_relay_wsl` to a path in WSL (for example,
+`/usr/local/bin/gpg_relay_wsl`) and `gpg_relay_win.exe` to Windows.
 
 ## A note about gpg-agent.exe and its support for SSH
 

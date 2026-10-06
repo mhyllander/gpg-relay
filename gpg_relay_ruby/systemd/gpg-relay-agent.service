@@ -1,10 +1,10 @@
 [Unit]
 Description=GPG Relay Agent
-Requires=gpg-relay-agent-socket.socket
-Requires=gpg-relay-agent-extra-socket.socket
-Requires=gpg-relay-agent-browser-socket.socket
-Wants=gpg-relay-agent-ssh-socket.socket
-After=gpg-relay-agent-socket.socket gpg-relay-agent-extra-socket.socket gpg-relay-agent-browser-socket.socket gpg-relay-agent-ssh-socket.socket
+Requires=gpg-relay-agent.socket
+Requires=gpg-relay-agent-extra.socket
+Requires=gpg-relay-agent-browser.socket
+Wants=gpg-relay-agent-ssh.socket
+After=gpg-relay-agent.socket gpg-relay-agent-extra.socket gpg-relay-agent-browser.socket gpg-relay-agent-ssh.socket
 
 [Service]
 Type=simple
