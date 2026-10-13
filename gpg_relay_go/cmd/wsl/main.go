@@ -39,6 +39,7 @@ func main() {
 func run() error {
 	mode := flag.String("mode", "mirrored", "GPG access mode: nat, mirrored, or npiperelay")
 	ssh := flag.Bool("enable-ssh-support", false, "forward SSH through npiperelay")
+	sshIdleTimeout := flag.Duration("ssh-idle-timeout", defaultSSHIdleTimeout, "stop an idle SSH relay after this long; zero or negative durations disable the idle timeout")
 	remote := flag.String("remote-address", "", "Windows relay address (default: gateway in NAT mode, localhost otherwise)")
 	port := flag.Int("port", 6910, "first of three GPG relay ports")
 	noncePath := flag.String("noncefile", "", "Windows relay nonce file")
@@ -138,7 +139,7 @@ func run() error {
 			return fmt.Errorf("listen %s: %w", s.name, err)
 		}
 		listeners = append(listeners, listener)
-		go serve(ctx, listener, s, *mode, *remote, *port, *noncePath, log)
+		go serve(ctx, listener, s, *mode, *remote, *port, *noncePath, *sshIdleTimeout, log)
 		log.Info("listening on socket", "socket_name", s.name, "address", listener.Addr())
 	}
 	<-ctx.Done()
@@ -249,7 +250,7 @@ func (p *socketPaths) wslPath(name string) (string, error) {
 	return path, nil
 }
 
-func serve(ctx context.Context, listener net.Listener, s socket, mode, remote string, firstPort int, noncePath string, log *slog.Logger) {
+func serve(ctx context.Context, listener net.Listener, s socket, mode, remote string, firstPort int, noncePath string, sshIdleTimeout time.Duration, log *slog.Logger) {
 	log = log.With("socket_name", s.name)
 	paths := &socketPaths{}
 	var sshRequests chan sshRequest
@@ -264,7 +265,7 @@ func serve(ctx context.Context, listener net.Listener, s socket, mode, remote st
 		if s.ssh {
 			if sshRequests == nil {
 				sshRequests = make(chan sshRequest)
-				go serveSSHRequests(ctx, sshRequests, log)
+				go serveSSHRequests(ctx, sshRequests, log, sshIdleTimeout)
 			}
 			go serveSSHClient(ctx, client, sshRequests)
 			continue

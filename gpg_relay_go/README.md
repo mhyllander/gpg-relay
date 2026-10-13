@@ -177,12 +177,15 @@ gpg_relay_wsl --help
 ```
 
 The Go executable uses long flags with a single or double leading dash.
-Supported flags are `--mode`, `--enable-ssh-support`, `--remote-address`,
-`--port`, `--noncefile`, `--logfile`, `--pidfile`, `--systemd`, and
-`--log-level`. Defaults are mirrored mode, port 6910, SSH disabled, and WARN
-logging. The default remote address is the NAT gateway in NAT mode and
-127.0.0.1 otherwise; an explicit `--remote-address` takes precedence.
-The `npiperelay` mode does not use the remote address.
+Supported flags are `--mode`, `--enable-ssh-support`, `--ssh-idle-timeout`,
+`--remote-address`, `--port`, `--noncefile`, `--logfile`, `--pidfile`,
+`--systemd`, and `--log-level`. Defaults are mirrored mode, port 6910, SSH
+disabled, WARN logging, and a 300 second SSH idle timeout. The default remote
+address is the NAT gateway in NAT mode and 127.0.0.1 otherwise; an explicit
+`--remote-address` takes precedence. The `npiperelay` mode does not use the
+remote address. `--ssh-idle-timeout` takes a Go duration (for example `5m` or
+`300s`); zero or negative durations disable the idle timeout so the SSH relay is kept
+alive.
 
 ### Win Relay
 

@@ -12,7 +12,9 @@ import (
 )
 
 const maxSSHMessage = 16 << 20
-const sshIdleTimeout = 60 * time.Second
+
+// defaultSSHIdleTimeout is used unless overridden by --ssh-idle-timeout.
+const defaultSSHIdleTimeout = 300 * time.Second
 
 type sshRequest struct {
 	client net.Conn
@@ -108,11 +110,7 @@ func writeAll(w io.Writer, packet []byte) error {
 	return nil
 }
 
-func serveSSHRequests(ctx context.Context, requests <-chan sshRequest, log *slog.Logger) {
-	serveSSHRequestsWithTimeout(ctx, requests, log, sshIdleTimeout)
-}
-
-func serveSSHRequestsWithTimeout(ctx context.Context, requests <-chan sshRequest, log *slog.Logger, idleTimeout time.Duration) {
+func serveSSHRequests(ctx context.Context, requests <-chan sshRequest, log *slog.Logger, idleTimeout time.Duration) {
 	// The first accepted client starts this worker and its child process.
 	process, err := startSSHProcess(ctx)
 	if err != nil {
@@ -124,14 +122,21 @@ func serveSSHRequestsWithTimeout(ctx context.Context, requests <-chan sshRequest
 		}
 	}()
 
-	idleTimer := time.NewTimer(idleTimeout)
-	defer idleTimer.Stop()
-	if process == nil {
-		idleTimer.Stop()
+	var idleTimer *time.Timer
+	var idleTimerC <-chan time.Time
+	if idleTimeout > 0 {
+		idleTimer = time.NewTimer(idleTimeout)
+		idleTimerC = idleTimer.C
+		defer idleTimer.Stop()
+		if process == nil {
+			idleTimer.Stop()
+		}
 	}
 
 	processCleanupAfterExit := func() {
-		idleTimer.Stop()
+		if idleTimer != nil {
+			idleTimer.Stop()
+		}
 		process.stdin.Close()
 		process.stdout.Close()
 		process = nil
@@ -149,7 +154,7 @@ func serveSSHRequestsWithTimeout(ctx context.Context, requests <-chan sshRequest
 			select {
 			case <-ctx.Done():
 				return
-			case <-idleTimer.C:
+			case <-idleTimerC:
 				log.Debug("SSH process idle timeout, stopping")
 				process.stop()
 				process = nil
@@ -159,7 +164,9 @@ func serveSSHRequestsWithTimeout(ctx context.Context, requests <-chan sshRequest
 				processCleanupAfterExit()
 				continue
 			case req = <-requests:
-				idleTimer.Stop()
+				if idleTimer != nil {
+					idleTimer.Stop()
+				}
 			}
 			// Reap an idle child that exited just before this request arrived.
 			select {
@@ -200,7 +207,7 @@ func serveSSHRequestsWithTimeout(ctx context.Context, requests <-chan sshRequest
 		}
 
 		// reset the idle timer after serving the request
-		if process != nil {
+		if process != nil && idleTimer != nil {
 			idleTimer.Reset(idleTimeout)
 		}
 	}

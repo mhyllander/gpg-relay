@@ -189,12 +189,18 @@ ruby /mnt/c/Program1/gpgrelay/gpg_relay_wsl.rb --help
 ```
 
 The Ruby executable uses the long options supported by `OptionParser`.
-Supported flags are `--mode`, `--enable-ssh-support`, `--remote-address`,
+Supported flags are `--mode`, `--enable-ssh-support`, `--ssh-idle-timeout`,
+`--remote-address`,
 `--port`, `--noncefile`, `--logfile`, `--pidfile`, `--systemd`, and
-`--log-level`. Defaults are mirrored mode, port 6910, SSH disabled, and WARN
-logging. The default remote address is the NAT gateway in NAT mode and
-127.0.0.1 otherwise; an explicit `--remote-address` takes precedence.
+`--log-level`. Defaults are mirrored mode, port 6910, SSH disabled, WARN
+logging, and a 300 second SSH idle timeout. The default remote address is the
+NAT gateway in NAT mode and 127.0.0.1 otherwise; an explicit `--remote-address`
+takes precedence.
 The `npiperelay` mode does not use the remote address.
+`--ssh-idle-timeout` takes a Go duration (for example `5m`, `300s`, or `1m30s`);
+zero or negative durations disable idle shutdown. The timeout starts when the
+first SSH client is accepted and resets after each completed request. It does
+not interrupt a request in progress; an idle child is restarted for the next request.
 
 ### Win Relay
 

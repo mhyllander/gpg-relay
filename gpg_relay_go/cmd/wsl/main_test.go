@@ -35,7 +35,7 @@ func startSocket(t *testing.T, s socket, mode, remote string, port int, nonce st
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	go serve(ctx, listener, s, mode, remote, port, nonce, slog.Default())
+	go serve(ctx, listener, s, mode, remote, port, nonce, defaultSSHIdleTimeout, slog.Default())
 	t.Cleanup(func() { cancel(); listener.Close() })
 	return path
 }
@@ -371,7 +371,7 @@ func TestSystemdNpiperelayChild(t *testing.T) {
 	defer listener.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go serve(ctx, listener, socket{"agent-socket", 0, false}, "npiperelay", "", 0, "", slog.Default())
+	go serve(ctx, listener, socket{"agent-socket", 0, false}, "npiperelay", "", 0, "", defaultSSHIdleTimeout, slog.Default())
 	time.Sleep(2 * time.Second)
 }
 
@@ -650,7 +650,7 @@ func TestSSHProcessStopsOnShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	go serve(ctx, listener, socket{"agent-ssh-socket", 0, true}, "mirrored", "", 0, "", slog.Default())
+	go serve(ctx, listener, socket{"agent-ssh-socket", 0, true}, "mirrored", "", 0, "", defaultSSHIdleTimeout, slog.Default())
 	client, err := net.Dial("unix", listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
@@ -683,6 +683,97 @@ func TestSSHProcessStopsOnShutdown(t *testing.T) {
 	t.Fatalf("npiperelay %d still running", pid)
 }
 
+func TestSSHIdleTimeoutDisabled(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		timeout time.Duration
+	}{
+		{"zero", 0},
+		{"negative", -time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := t.TempDir()
+			launches := filepath.Join(bin, "launches")
+			fake := "#!/usr/bin/env python3\nimport os,sys,struct\nwith open(os.environ['TEST_LAUNCHES'],'a') as f: f.write(str(os.getpid())+'\\n')\nwhile True:\n h=sys.stdin.buffer.read(4)\n if len(h)<4: break\n n=struct.unpack('>I',h)[0]\n body=sys.stdin.buffer.read(n)\n sys.stdout.buffer.write(h+body)\n sys.stdout.buffer.flush()\n"
+			if err := os.WriteFile(filepath.Join(bin, "npiperelay"), []byte(fake), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+			t.Setenv("TEST_LAUNCHES", launches)
+			ctx, cancel := context.WithCancel(context.Background())
+			requests := make(chan sshRequest)
+			workerDone := make(chan struct{})
+			go func() {
+				defer close(workerDone)
+				serveSSHRequests(ctx, requests, slog.Default(), tc.timeout)
+			}()
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case <-workerDone:
+				case <-time.After(3 * time.Second):
+					t.Error("SSH worker did not stop")
+				}
+			})
+
+			var pid int
+			deadline := time.Now().Add(3 * time.Second)
+			for time.Now().Before(deadline) {
+				data, _ := os.ReadFile(launches)
+				fields := strings.Fields(string(data))
+				if len(fields) > 0 {
+					var err error
+					pid, err = strconv.Atoi(fields[0])
+					if err != nil {
+						t.Fatal(err)
+					}
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if pid == 0 {
+				t.Fatal("npiperelay did not start")
+			}
+			assertIdleProcess := func() {
+				t.Helper()
+				time.Sleep(200 * time.Millisecond)
+				if err := syscall.Kill(pid, 0); err != nil {
+					t.Fatalf("idle process did not survive: %v", err)
+				}
+				data, err := os.ReadFile(launches)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(strings.Fields(string(data))) != 1 {
+					t.Fatalf("unexpected process launches: %q", data)
+				}
+			}
+			assertIdleProcess()
+
+			server, client := net.Pipe()
+			defer client.Close()
+			go serveSSHClient(ctx, server, requests)
+			client.SetDeadline(time.Now().Add(3 * time.Second))
+			for _, message := range []string{"first", "second"} {
+				if got := sshExchange(t, client, message); got != message {
+					t.Fatalf("response %q, want %q", got, message)
+				}
+				assertIdleProcess()
+			}
+
+			cancel()
+			select {
+			case <-workerDone:
+			case <-time.After(3 * time.Second):
+				t.Fatal("SSH worker did not stop after cancellation")
+			}
+			if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+				t.Fatalf("child process was not reaped after cancellation: %v", err)
+			}
+		})
+	}
+}
+
 func TestSSHIdleTimeout(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "bin")
@@ -699,7 +790,7 @@ func TestSSHIdleTimeout(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	requests := make(chan sshRequest)
-	go serveSSHRequestsWithTimeout(ctx, requests, slog.Default(), 150*time.Millisecond)
+	go serveSSHRequests(ctx, requests, slog.Default(), 150*time.Millisecond)
 	newClient := func() net.Conn {
 		server, client := net.Pipe()
 		go serveSSHClient(ctx, server, requests)

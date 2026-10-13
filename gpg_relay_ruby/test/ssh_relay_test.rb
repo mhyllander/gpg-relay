@@ -100,6 +100,37 @@ class SSHRelayTest < Minitest::Test
     wait_until { !File.exist?("/proc/#{first_pid}") }
   end
 
+  def test_zero_disables_idle_timeout
+    assert_disabled_idle_timeout(0)
+  end
+
+  def test_negative_disables_idle_timeout
+    assert_disabled_idle_timeout(-1)
+  end
+
+  def assert_disabled_idle_timeout(timeout)
+    @relay.close
+    @relay = SSHRelay.new(Logger.new(File::NULL), idle_timeout: timeout, command: @child)
+    client = connect
+    wait_until { pids.length == 1 }
+    pid = pids.first
+    sleep 0.2
+    assert File.exist?("/proc/#{pid}"), 'child should survive before the first request'
+    exchange(client, 'first')
+    sleep 0.2
+    assert File.exist?("/proc/#{pid}"), 'child should survive between requests'
+    exchange(client, 'second')
+    assert_equal [pid], pids
+
+    # Disabling idle shutdown must still allow recovery from an exited child.
+    Process.kill('KILL', pid)
+    wait_until { !File.exist?("/proc/#{pid}") }
+    exchange(client, 'after exit')
+    assert_equal 2, pids.length
+    @relay.close
+    wait_until { !File.exist?("/proc/#{pids.last}") }
+  end
+
   def test_exited_process_fails_active_request_without_replay
     client = connect
     send_packet(client, 'exit')

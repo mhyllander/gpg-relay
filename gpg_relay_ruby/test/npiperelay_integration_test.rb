@@ -109,6 +109,44 @@ class NpiperelayIntegrationTest < Minitest::Test
     assert_children_exit(1)
   end
 
+  def test_cli_ssh_idle_timeout_stops_and_restarts_child
+    start_relay(ssh_idle_timeout: '100ms')
+    path = File.join(@dir, 'agent-ssh-socket')
+    wait_for_socket(path)
+    UNIXSocket.open(path) do |client|
+      assert_equal 'first', ssh_exchange(client, 'first')
+      assert_children_exit(1)
+      assert_equal 'after idle', ssh_exchange(client, 'after idle')
+    end
+    stop_relay
+    assert_children_exit(2)
+  end
+
+  def test_cli_zero_disables_ssh_idle_timeout
+    assert_cli_idle_timeout_disabled('0')
+  end
+
+  def test_cli_negative_disables_ssh_idle_timeout_with_systemd
+    assert_cli_idle_timeout_disabled('-1s', true)
+  end
+
+  def test_cli_rejects_invalid_ssh_idle_timeout
+    %w[5 1d 1s-2s 9223372036854775808ns].each do |value|
+      output = IO.popen(@env, ['/usr/bin/ruby', WSL, '--ssh-idle-timeout', value], err: %i[child out], &:read)
+      refute $?.success?, value
+      assert_includes output, 'invalid argument', value
+      assert_includes output, '--ssh-idle-timeout', value
+    end
+  end
+
+  def test_cli_help_documents_ssh_idle_timeout
+    output = IO.popen(@env, ['/usr/bin/ruby', WSL, '--help'], err: %i[child out], &:read)
+    assert $?.success?
+    assert_includes output, '--ssh-idle-timeout DURATION'
+    assert_includes output, '[5m]'
+    assert_includes output, 'zero or negative durations disable'
+  end
+
   def test_gpg_uses_direct_assuan_in_mirrored_mode
     server = TCPServer.new('127.0.0.1', 0)
     nonce = 'a' * 16
@@ -243,6 +281,26 @@ class NpiperelayIntegrationTest < Minitest::Test
 
   private
 
+  def assert_cli_idle_timeout_disabled(value, systemd = false)
+    path = File.join(@dir, systemd ? 'activated.sock' : 'agent-ssh-socket')
+    @listen_socket = UNIXServer.new(path) if systemd
+    start_relay(systemd, ssh_idle_timeout: value)
+    wait_for_socket(path)
+    UNIXSocket.open(path) do |client|
+      Timeout.timeout(5) { sleep 0.01 until File.exist?(@env['TEST_CHILD_PIDS']) }
+      pid = File.readlines(@env['TEST_CHILD_PIDS']).first.to_i
+      sleep 0.2
+      assert File.exist?("/proc/#{pid}"), 'child should survive before the first request'
+      assert_equal 'first', ssh_exchange(client, 'first')
+      sleep 0.2
+      assert File.exist?("/proc/#{pid}"), 'child should survive between requests'
+      assert_equal 'second', ssh_exchange(client, 'second')
+      assert_equal [pid], File.readlines(@env['TEST_CHILD_PIDS']).map(&:to_i)
+    end
+    stop_relay
+    assert_children_exit(1)
+  end
+
   def ssh_exchange(client, payload)
     client.write([payload.bytesize].pack('N') + payload)
     header = Timeout.timeout(5) { client.read(4) }
@@ -261,11 +319,12 @@ class NpiperelayIntegrationTest < Minitest::Test
     File.chmod(0o755, path)
   end
 
-  def start_relay(systemd = false, mode = 'mirrored', port = nil, ssh = true, listen_name = 'agent-ssh-socket')
+  def start_relay(systemd = false, mode = 'mirrored', port = nil, ssh = true, listen_name = 'agent-ssh-socket', ssh_idle_timeout: nil)
     env = @env.dup
     env['TEST_GPG_SOCKET_PATHS'] = '1' if mode == 'npiperelay'
     args = ['/usr/bin/ruby', WSL, '--noncefile', File.join(@dir, 'nonce'), '--mode', mode]
     args << '--enable-ssh-support' if ssh
+    args.concat(['--ssh-idle-timeout', ssh_idle_timeout]) if ssh_idle_timeout
     args.concat(['--port', port.to_s]) if port
     if systemd
       env['LISTEN_FDNAMES'] = listen_name

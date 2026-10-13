@@ -5,7 +5,7 @@ require 'open3'
 # One SSH agent pipe is shared by all clients of the WSL SSH socket.
 class SSHRelay
   MAX_MESSAGE = 16 * 1024 * 1024
-  IDLE_TIMEOUT = 60
+  IDLE_TIMEOUT = 300
 
   def initialize(logger, idle_timeout: IDLE_TIMEOUT, command: 'npiperelay')
     @logger = logger
@@ -108,7 +108,7 @@ class SSHRelay
       @command, '-p', '-l', '-s', '-ep', '//./pipe/openssh-ssh-agent'
     )
     @mutex.synchronize {@ready.broadcast}
-    Process.clock_gettime(Process::CLOCK_MONOTONIC) + @idle_timeout
+    idle_deadline
   rescue StandardError => e
     @logger.error "start SSH npiperelay failed: #{e.inspect}"
     @input = @output = @wait_thread = nil
@@ -119,6 +119,10 @@ class SSHRelay
     Process.kill('KILL', pid)
   rescue Errno::ESRCH
     nil
+  end
+
+  def idle_deadline
+    Process.clock_gettime(Process::CLOCK_MONOTONIC) + @idle_timeout if @idle_timeout > 0
   end
 
   def stop_process
@@ -182,7 +186,7 @@ class SSHRelay
         @logger.debug "SSH client response failed: #{e.inspect}"
         request[:done] << false
       end
-      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @idle_timeout
+      deadline = idle_deadline
     end
   ensure
     stop_process

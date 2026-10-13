@@ -12,6 +12,7 @@ require 'open3'
 
 require_relative 'relay'
 require_relative 'ssh_relay'
+require_relative 'go_duration'
 
 FIRST_PORT = 6910
 
@@ -26,7 +27,9 @@ class WslRelay < Relay
     @windows_assuan_socket_paths = {}
     @windows_gpg_socket_paths_mutex = Mutex.new
     @windows_assuan_socket_paths_mutex = Mutex.new
-    @ssh_relay = SSHRelay.new(@logger) if options[:socket_names].values.any? { |config| config[:type] == :ssh }
+    if options[:socket_names].values.any? { |config| config[:type] == :ssh }
+      @ssh_relay = SSHRelay.new(@logger, idle_timeout: options.fetch(:ssh_idle_timeout, SSHRelay::IDLE_TIMEOUT))
+    end
 
     # setup cleanup handlers
     at_exit {cleanup}
@@ -259,6 +262,7 @@ options = {
   mode:               'mirrored',
   remote_address:     '127.0.0.1',
   enable_ssh_support: false,
+  ssh_idle_timeout:   SSHRelay::IDLE_TIMEOUT,
   systemd:            false,
   port:               FIRST_PORT,
   noncefile:          nil,
@@ -279,6 +283,11 @@ OptionParser.new do |opts|
   end
   opts.on('-s', '--[no-]enable-ssh-support', 'Relay SSH through the Gpg4win named pipe using npiperelay') do |v|
     options[:enable_ssh_support] = v
+  end
+  opts.on('--ssh-idle-timeout DURATION', String, 'Stop an idle SSH relay after this Go duration [5m]; zero or negative durations disable the idle timeout') do |v|
+    options[:ssh_idle_timeout] = GoDuration.parse(v)
+  rescue ArgumentError => e
+    raise OptionParser::InvalidArgument, e.message
   end
   opts.on('-r', '--remote-address IPADDR', String, "The remote address of the Windows relay component [#{options[:remote_address]}]") do |v|
     options[:remote_address] = v
