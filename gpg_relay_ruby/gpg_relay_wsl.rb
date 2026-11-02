@@ -79,7 +79,7 @@ class WslRelay < Relay
   end
 
   def start_socket_listener(socket_name, remote_address, config, noncefile)
-    socket_path = %x[gpgconf --list-dirs #{socket_name}].chomp
+    socket_path = Relay.command_output('gpgconf', '--list-dirs', socket_name)
     assuan_socket_path = windows_assuan_socket_path(socket_name) if config[:type] == :assuan
     @logger.info {"start listener on WSL socket #{socket_name} = #{socket_path}"}
     # File.unlink(socket_path) if File.exist?(socket_path) && File.socket?(socket_path)
@@ -105,14 +105,14 @@ class WslRelay < Relay
     @windows_assuan_socket_paths_mutex.synchronize do
       @windows_assuan_socket_paths[socket_name] ||= begin
         path = windows_gpg_socket_path(socket_name)
-        %x[wslpath -u '#{path}'].chomp
+        Relay.command_output('wslpath', '-u', path)
       end
     end
   end
 
   def windows_gpg_socket_path(socket_name)
     @windows_gpg_socket_paths_mutex.synchronize do
-      @windows_gpg_socket_paths[socket_name] ||= %x[gpgconf.exe --list-dirs #{socket_name}].chomp
+      @windows_gpg_socket_paths[socket_name] ||= Relay.command_output('gpgconf.exe', '--list-dirs', socket_name)
     end
   end
 
@@ -339,16 +339,16 @@ end
 
 case options[:mode]
 when 'nat'
-  options[:remote_address] = Regexp.last_match(1) if %x[ip route].split("\n").grep(/^default via /).first =~ /^default via ([0-9.]+)/
+  options[:remote_address] = Regexp.last_match(1) if Relay.command_output('ip', 'route').split("\n").grep(/^default via /).first =~ /^default via ([0-9.]+)/
 when 'mirrored'
   options[:remote_address] = '127.0.0.1'
 end
 
 if options[:noncefile].nil?
   begin
-    win_gpghome = %x[gpgconf.exe --list-dirs homedir].chomp
+    win_gpghome = Relay.command_output('gpgconf.exe', '--list-dirs', 'homedir')
     noncefile = 'gpg_relay.nonce'
-    options[:noncefile] = "#{%x[wslpath -u '#{win_gpghome}'].chomp}/#{noncefile}"
+    options[:noncefile] = "#{Relay.command_output('wslpath', '-u', win_gpghome)}/#{noncefile}"
   rescue StandardError => e
     logger.error 'constructing path to noncefile'
     logger.error e

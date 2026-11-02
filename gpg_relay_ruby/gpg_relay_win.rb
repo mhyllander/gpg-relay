@@ -57,7 +57,7 @@ class WindowsRelay < Relay
 
   def start_assuan_proxy(socket_name, remote_address, config, nonce)
     port = config[:port]
-    socket_path = %x[gpgconf.exe --list-dirs #{socket_name}].chomp
+    socket_path = Relay.command_output('gpgconf.exe', '--list-dirs', socket_name)
     @logger.info {"start assuan socket proxy for #{socket_name} = #{socket_path} on port #{port}"}
     Socket.tcp_server_loop(remote_address, port) do |sock, _client_addrinfo|
       @logger.debug {"got bridge connect request on port #{port} for #{socket_name}"}
@@ -68,7 +68,11 @@ class WindowsRelay < Relay
       else
         @logger.info {"got correct nonce on port #{port} for #{socket_name}"}
         gpg_agent = dial_assuan socket_path
-        relay sock, gpg_agent
+        if gpg_agent
+          relay sock, gpg_agent
+        else
+          sock.close
+        end
       end
     end
   end
@@ -134,7 +138,7 @@ logger = get_logger options[:log_level]
 
 if options[:noncefile].nil?
   begin
-    win_gpghome = %x[gpgconf.exe --list-dirs homedir].chomp
+    win_gpghome = Relay.command_output('gpgconf.exe', '--list-dirs', 'homedir')
     noncefile = 'gpg_relay.nonce'
     options[:noncefile] = "#{win_gpghome}\\#{noncefile}"
   rescue StandardError => e

@@ -1,28 +1,37 @@
+require 'open3'
+require 'socket'
+
 class Relay
   def initialize(options, logger)
     @options = options
     @logger = logger
   end
 
+  # Runs a command without a shell and returns its chomped stdout.
+  def self.command_output(*command)
+    output, status = Open3.capture2(*command)
+    raise "#{command.join(' ')} failed with #{status}" unless status.success?
+
+    output.chomp
+  end
+
+  # Returns a connected socket, or nil (after logging) when the descriptor is unusable.
   def dial_assuan(socket_path)
     # the assuan "socket" file contains a port number (ascii characters), followed by a new line character (10), then a
     # nonce (16 bytes)
-    bytes = []
-    File.open(socket_path, 'rb') do |f|
-      f.each_byte do |b|
-        bytes << b
-      end
+    port_text, separator, nonce = File.binread(socket_path).partition("\n")
+    port = Integer(port_text, 10, exception: false)
+    if separator.empty? || port.nil? || !port.between?(1, 65_535)
+      @logger.error {"#{socket_path} is not a valid assuan socket descriptor"}
+      return nil
     end
-    sep = bytes.index(10)
-    port = bytes.slice(0, sep).pack('C*').to_i
-    nonce = bytes.slice(sep + 1, bytes.length)
     @logger.debug {"assuan socket #{socket_path} -> TCP 127.0.0.1:#{port}"}
-    if nonce.length != 16
-      @logger.error {"#{socket_path} nonce length is #{nonce.length} != 16"}
-      exit 1
+    if nonce.bytesize != 16
+      @logger.error {"#{socket_path} nonce length is #{nonce.bytesize} != 16"}
+      return nil
     end
     gpg_agent = TCPSocket.new '127.0.0.1', port
-    gpg_agent.write nonce.pack('C16') # send the nonce to "authenticate"
+    gpg_agent.write nonce # send the nonce to "authenticate"
     gpg_agent
   end
 
