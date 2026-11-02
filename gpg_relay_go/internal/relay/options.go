@@ -1,16 +1,23 @@
 package relay
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
+// CommandTimeout bounds helper commands such as gpgconf.exe.
+const CommandTimeout = 10 * time.Second
+
 func CommandOutput(name string, args ...string) (string, error) {
-	out, err := exec.Command(name, args...).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), CommandTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, name, args...).Output()
 	if err != nil {
 		return "", fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
 	}

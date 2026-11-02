@@ -859,3 +859,23 @@ func TestSSHIdleTimeout(t *testing.T) {
 	}
 	first.Close()
 }
+
+func TestListenUnixReplacesStaleSocketOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.sock")
+	stale, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale.SetUnlinkOnClose(false)
+	stale.Close() // leaves the socket file behind, as a crash would
+
+	live, err := listenUnix(path)
+	if err != nil {
+		t.Fatalf("stale socket not replaced: %v", err)
+	}
+	defer live.Close()
+	if second, err := listenUnix(path); err == nil {
+		second.Close()
+		t.Fatal("live socket was replaced")
+	}
+}

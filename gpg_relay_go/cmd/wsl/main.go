@@ -123,6 +123,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		sealActivation(len(fdNames))
 	}
 	for _, s := range names {
 		var listener net.Listener
@@ -133,7 +134,7 @@ func run() error {
 			if pathErr != nil {
 				return pathErr
 			}
-			listener, err = net.Listen("unix", path)
+			listener, err = listenUnix(path)
 		}
 		if err != nil {
 			return fmt.Errorf("listen %s: %w", s.name, err)
@@ -144,6 +145,26 @@ func run() error {
 	}
 	<-ctx.Done()
 	return nil
+}
+
+// listenUnix listens on path, replacing a stale socket file left by a crashed
+// process. A socket that still accepts connections is never removed.
+func listenUnix(path string) (net.Listener, error) {
+	listener, err := net.Listen("unix", path)
+	if err == nil || !errors.Is(err, syscall.EADDRINUSE) {
+		return listener, err
+	}
+	if info, statErr := os.Lstat(path); statErr != nil || info.Mode()&os.ModeSocket == 0 {
+		return nil, err
+	}
+	if conn, dialErr := net.DialTimeout("unix", path, time.Second); dialErr == nil {
+		conn.Close()
+		return nil, err
+	}
+	if rmErr := os.Remove(path); rmErr != nil {
+		return nil, err
+	}
+	return net.Listen("unix", path)
 }
 
 func defaultGateway() (string, error) {
@@ -174,6 +195,17 @@ func activationNames() ([]string, error) {
 		return nil, errors.New("LISTEN_FDNAMES count does not match LISTEN_FDS")
 	}
 	return names, nil
+}
+
+// sealActivation keeps the inherited descriptors and LISTEN_* variables away
+// from child processes such as gpgconf.exe and npiperelay.
+func sealActivation(count int) {
+	for fd := 3; fd < 3+count; fd++ {
+		syscall.CloseOnExec(fd)
+	}
+	os.Unsetenv("LISTEN_PID")
+	os.Unsetenv("LISTEN_FDS")
+	os.Unsetenv("LISTEN_FDNAMES")
 }
 
 func activatedListener(names []string, name string) (net.Listener, error) {
@@ -279,7 +311,7 @@ func serve(ctx context.Context, listener net.Listener, s socket, mode, remote st
 					return
 				}
 				log.Debug("relaying via npiperelay", "path", path)
-				relayNpiperelay(client, []string{"-a", "-ei", "-ep"}, path, log)
+				relayNpiperelay(ctx, client, []string{"-a", "-ei", "-ep"}, path, log)
 				return
 			}
 			var upstream net.Conn
@@ -304,10 +336,12 @@ func serve(ctx context.Context, listener net.Listener, s socket, mode, remote st
 	}
 }
 
-func relayNpiperelay(client net.Conn, targetFlags []string, targetPath string, log *slog.Logger) {
+// relayNpiperelay bridges client to a Windows pipe or socket through npiperelay.
+// The child is killed when ctx ends or when the client can no longer receive.
+func relayNpiperelay(ctx context.Context, client net.Conn, targetFlags []string, targetPath string, log *slog.Logger) {
 	defer client.Close()
-	args := append(targetFlags, targetPath)
-	cmd := exec.Command("npiperelay", args...)
+	args := append(append([]string(nil), targetFlags...), targetPath)
+	cmd := exec.CommandContext(ctx, "npiperelay", args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		log.Error("npiperelay stdin pipe creation failed", "error", err)
@@ -327,6 +361,8 @@ func relayNpiperelay(client net.Conn, targetFlags []string, targetPath string, l
 	_, err = io.Copy(client, stdout)
 	if err != nil {
 		log.Debug("npiperelay output closed", "error", err)
+		// The client is gone; do not wait for npiperelay to notice.
+		cmd.Process.Kill()
 	}
 	if cw, ok := client.(interface{ CloseWrite() error }); ok {
 		cw.CloseWrite()
