@@ -40,6 +40,11 @@ func DialAssuan(path string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	return dialWithNonce(address, nonce)
+}
+
+// dialWithNonce connects to address and sends nonce to authenticate.
+func dialWithNonce(address string, nonce []byte) (net.Conn, error) {
 	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
 	if err != nil {
 		return nil, err
@@ -67,15 +72,39 @@ func DialWindows(address string, port int, noncePath string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(address, strconv.Itoa(port)), 10*time.Second)
+	return dialWithNonce(net.JoinHostPort(address, strconv.Itoa(port)), nonce)
+}
+
+// CachedPath remembers the first successful lookup. A failed or empty lookup is retried.
+type CachedPath struct {
+	mu   sync.Mutex
+	path string
+}
+
+func (c *CachedPath) Get(lookup func() (string, error)) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.path != "" {
+		return c.path, nil
+	}
+	path, err := lookup()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	if _, err = conn.Write(nonce); err != nil {
-		conn.Close()
-		return nil, err
+	if path == "" {
+		return "", errors.New("empty path")
 	}
-	return conn, nil
+	c.path = path
+	return path, nil
+}
+
+// WindowsSocketPath asks gpgconf.exe for the Windows path of a gpg-agent socket.
+func WindowsSocketPath(name string) (string, error) {
+	path, err := CommandOutput("gpgconf.exe", "--list-dirs", name)
+	if err == nil && path == "" {
+		err = fmt.Errorf("gpgconf.exe returned an empty path for %s", name)
+	}
+	return path, err
 }
 
 type closeWriter interface{ CloseWrite() error }

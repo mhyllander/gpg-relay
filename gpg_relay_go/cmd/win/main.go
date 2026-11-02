@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"gpg_relay_go/internal/relay"
@@ -96,8 +97,40 @@ func run() error {
 	return nil
 }
 
+// maxConnections caps simultaneous relayed connections per listener.
+const maxConnections = 64
+
+// warnLimiter lets a repeated warning through at most once per interval and
+// reports how many were suppressed in between.
+type warnLimiter struct {
+	mu         sync.Mutex
+	interval   time.Duration
+	last       time.Time
+	suppressed int
+}
+
+func (w *warnLimiter) warn(log *slog.Logger, msg string, args ...any) {
+	w.mu.Lock()
+	now := time.Now()
+	if !w.last.IsZero() && now.Sub(w.last) < w.interval {
+		w.suppressed++
+		w.mu.Unlock()
+		return
+	}
+	suppressed := w.suppressed
+	w.last, w.suppressed = now, 0
+	w.mu.Unlock()
+	if suppressed > 0 {
+		args = append(args, "suppressed", suppressed)
+	}
+	log.Warn(msg, args...)
+}
+
 func serve(ctx context.Context, listener net.Listener, name string, nonce []byte, log *slog.Logger) {
 	log = log.With("socket_name", name)
+	var socketPath relay.CachedPath
+	slots := make(chan struct{}, maxConnections)
+	limiter := &warnLimiter{interval: 10 * time.Second}
 	for {
 		client, err := listener.Accept()
 		if err != nil {
@@ -106,7 +139,15 @@ func serve(ctx context.Context, listener net.Listener, name string, nonce []byte
 			}
 			return
 		}
+		select {
+		case slots <- struct{}{}:
+		default:
+			limiter.warn(log, "too many connections, rejecting", "limit", maxConnections)
+			client.Close()
+			continue
+		}
 		go func() {
+			defer func() { <-slots }()
 			defer client.Close()
 			client.SetReadDeadline(time.Now().Add(10 * time.Second))
 			got := make([]byte, relay.NonceSize)
@@ -116,10 +157,10 @@ func serve(ctx context.Context, listener net.Listener, name string, nonce []byte
 			}
 			client.SetReadDeadline(time.Time{})
 			if subtle.ConstantTimeCompare(got, nonce) != 1 {
-				log.Error("incorrect nonce")
+				limiter.warn(log, "incorrect nonce", "remote", client.RemoteAddr())
 				return
 			}
-			path, err := relay.CommandOutput("gpgconf.exe", "--list-dirs", name)
+			path, err := socketPath.Get(func() (string, error) { return relay.WindowsSocketPath(name) })
 			if err != nil {
 				log.Error("Windows socket path lookup failed", "error", err)
 				return

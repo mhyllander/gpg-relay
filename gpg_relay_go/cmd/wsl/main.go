@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -233,58 +232,49 @@ func activatedListener(names []string, name string) (net.Listener, error) {
 
 // socketPaths caches successful lookups for one listener. A failed lookup is retried.
 type socketPaths struct {
-	mu      sync.Mutex
-	windows string
-	wsl     string
+	windows relay.CachedPath
+	wsl     relay.CachedPath
 }
 
 func (p *socketPaths) windowsPath(name string) (string, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.windows != "" {
-		return p.windows, nil
-	}
-	path, err := relay.CommandOutput("gpgconf.exe", "--list-dirs", name)
-	if err != nil {
-		return "", err
-	}
-	if path == "" {
-		return "", fmt.Errorf("gpgconf.exe returned an empty path for %s", name)
-	}
-	p.windows = path
-	return path, nil
+	return p.windows.Get(func() (string, error) { return relay.WindowsSocketPath(name) })
 }
 
 func (p *socketPaths) wslPath(name string) (string, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.wsl != "" {
-		return p.wsl, nil
-	}
-	if p.windows == "" {
-		path, err := relay.CommandOutput("gpgconf.exe", "--list-dirs", name)
+	return p.wsl.Get(func() (string, error) {
+		windows, err := p.windowsPath(name)
 		if err != nil {
 			return "", err
 		}
-		if path == "" {
-			return "", fmt.Errorf("gpgconf.exe returned an empty path for %s", name)
+		path, err := relay.CommandOutput("wslpath", "-u", windows)
+		if err == nil && path == "" {
+			err = fmt.Errorf("wslpath returned an empty path for %s", name)
 		}
-		p.windows = path
+		return path, err
+	})
+}
+
+// upstreamDialer returns the function that opens a Windows-side connection
+// for the nat and mirrored modes.
+func upstreamDialer(s socket, mode, remote string, firstPort int, noncePath string, paths *socketPaths) func() (net.Conn, error) {
+	if mode == "nat" {
+		return func() (net.Conn, error) {
+			return relay.DialWindows(remote, firstPort+s.offset, noncePath)
+		}
 	}
-	path, err := relay.CommandOutput("wslpath", "-u", p.windows)
-	if err != nil {
-		return "", err
+	return func() (net.Conn, error) {
+		path, err := paths.wslPath(s.name)
+		if err != nil {
+			return nil, err
+		}
+		return relay.DialAssuan(path)
 	}
-	if path == "" {
-		return "", fmt.Errorf("wslpath returned an empty path for %s", name)
-	}
-	p.wsl = path
-	return path, nil
 }
 
 func serve(ctx context.Context, listener net.Listener, s socket, mode, remote string, firstPort int, noncePath string, sshIdleTimeout time.Duration, log *slog.Logger) {
 	log = log.With("socket_name", s.name)
 	paths := &socketPaths{}
+	dial := upstreamDialer(s, mode, remote, firstPort, noncePath, paths)
 	var sshRequests chan sshRequest
 	for {
 		client, err := listener.Accept()
@@ -314,18 +304,7 @@ func serve(ctx context.Context, listener net.Listener, s socket, mode, remote st
 				relayNpiperelay(ctx, client, []string{"-a", "-ei", "-ep"}, path, log)
 				return
 			}
-			var upstream net.Conn
-			var dialErr error
-			if mode == "nat" {
-				upstream, dialErr = relay.DialWindows(remote, firstPort+s.offset, noncePath)
-			} else {
-				path, err := paths.wslPath(s.name)
-				if err != nil {
-					dialErr = err
-				} else {
-					upstream, dialErr = relay.DialAssuan(path)
-				}
-			}
+			upstream, dialErr := dial()
 			if dialErr != nil {
 				log.Error("upstream connection failed", "error", dialErr)
 				client.Close()

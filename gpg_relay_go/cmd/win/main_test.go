@@ -94,3 +94,54 @@ func TestNonceAuthenticationAndAssuanForwarding(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestWarnLimiterSuppressesRepeats(t *testing.T) {
+	var buf strings.Builder
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	limiter := &warnLimiter{interval: time.Hour}
+	for i := 0; i < 5; i++ {
+		limiter.warn(log, "incorrect nonce")
+	}
+	if n := strings.Count(buf.String(), "incorrect nonce"); n != 1 {
+		t.Fatalf("logged %d times, want 1", n)
+	}
+	limiter.last = time.Now().Add(-2 * time.Hour)
+	limiter.warn(log, "incorrect nonce")
+	if !strings.Contains(buf.String(), "suppressed=4") {
+		t.Fatalf("missing suppressed count in %q", buf.String())
+	}
+}
+
+func TestConnectionLimit(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go serve(ctx, listener, "agent-socket", []byte(strings.Repeat("b", 16)), slog.Default())
+	// Idle connections hold their slots while the server waits for a nonce.
+	var held []net.Conn
+	for i := 0; i < maxConnections; i++ {
+		c, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, c)
+	}
+	defer func() {
+		for _, c := range held {
+			c.Close()
+		}
+	}()
+	extra, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer extra.Close()
+	extra.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := extra.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("over-limit connection: %v, want EOF", err)
+	}
+}
